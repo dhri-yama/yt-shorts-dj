@@ -58,3 +58,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Documentation (local only)
+COMMITS.md
+DELIVERABLES.md
+FLOW.md
+plan.md
+prompt.md
