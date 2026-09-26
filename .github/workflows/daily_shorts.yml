@@ -1,0 +1,65 @@
+name: YouTube Shorts Daily Sync
+
+on:
+  schedule:
+    # Run daily at 1:00 AM UTC
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+jobs:
+  sync-shorts:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git operations
+          
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          
+      - name: Run Shorts Sync
+        env:
+          # YouTube OAuth 2.0
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          
+          # Channel Configuration
+          YOUTUBE_CHANNEL_IDS: ${{ secrets.YOUTUBE_CHANNEL_IDS }}
+          TARGET_PLAYLIST_ID: ${{ secrets.TARGET_PLAYLIST_ID }}
+          
+          # Application Settings
+          BATCH_SIZE: ${{ secrets.BATCH_SIZE || '15' }}
+          HISTORY_FILE: history.json
+          LOG_LEVEL: INFO
+        run: |
+          python -m src.main --verbose
+          
+      - name: Commit and push history updates
+        run: |
+          # Check if history.json was modified
+          if git diff --quiet history.json; then
+            echo "No changes to history.json"
+          else
+            git add history.json
+            git commit -m "chore: update history with new Shorts [skip ci]"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
