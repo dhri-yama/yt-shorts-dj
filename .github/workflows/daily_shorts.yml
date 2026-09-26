@@ -34,21 +34,18 @@ jobs:
           
       - name: Run Shorts Sync
         env:
-          # YouTube OAuth 2.0
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          
-          # Channel Configuration
-          YOUTUBE_CHANNEL_IDS: ${{ secrets.YOUTUBE_CHANNEL_IDS }}
-          TARGET_PLAYLIST_ID: ${{ secrets.TARGET_PLAYLIST_ID }}
-          
-          # Application Settings
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID || 'MISSING_CLIENT_ID' }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET || 'MISSING_CLIENT_SECRET' }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN || 'MISSING_REFRESH_TOKEN' }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY || 'MISSING_API_KEY' }}
+          YOUTUBE_CHANNEL_IDS: ${{ secrets.YOUTUBE_CHANNEL_IDS || 'MISSING_CHANNEL_IDS' }}
+          TARGET_PLAYLIST_ID: ${{ secrets.TARGET_PLAYLIST_ID || 'MISSING_PLAYLIST_ID' }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE || '15' }}
           HISTORY_FILE: history.json
           LOG_LEVEL: INFO
         run: |
+          echo "API Key: $YOUTUBE_API_KEY"
+          echo "Client ID: $YOUTUBE_CLIENT_ID"
           python -m src.main --verbose
           
       - name: Commit and push history updates
