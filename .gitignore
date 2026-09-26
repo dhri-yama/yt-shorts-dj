@@ -48,7 +48,7 @@ config.yaml
 config/config.yaml
 
 # Local history (will be managed by GitHub Actions)
-history.json
+# history.json
 history.json.backup
 
 # Logs
