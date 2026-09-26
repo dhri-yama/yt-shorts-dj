@@ -1,0 +1,19 @@
+# YouTube API Configuration
+# These should be set via environment variables in production
+youtube:
+  api_key: ""
+  client_id: ""
+  client_secret: ""
+  refresh_token: ""
+
+# Application Configuration
+app:
+  channel_ids:
+    - "UC-channel-id-1"
+    - "UC-channel-id-2"
+  target_playlist_id: "PL-target-playlist-id"
+  batch_size: 15
+  history_file: "history.json"
+  max_retries: 3
+  backoff_factor: 2.0
+  log_level: "INFO"
