@@ -2,8 +2,7 @@ name: YouTube Shorts Daily Sync
 
 on:
   schedule:
-    # Run daily at 1:00 AM UTC
-    - cron: '0 1 * * *'
+    - cron: '0 3 * * *'
   workflow_dispatch:
     # Allow manual triggering
 
