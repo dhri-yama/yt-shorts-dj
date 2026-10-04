@@ -85,8 +85,7 @@ class VideoDuration:
             parts.append(f"{self.hours}H")
         if self.minutes > 0:
             parts.append(f"{self.minutes}M")
-        if self.seconds > 0 or not parts:
-            parts.append(f"{self.seconds}S")
+        parts.append(f"{self.seconds}S")
         return f"PT{''.join(parts)}"
 
 

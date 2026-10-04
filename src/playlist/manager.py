@@ -128,42 +128,189 @@ class PlaylistManager:
         candidate_ids = [v.id for v in candidates]
         unseen_ids = await self.history.filter_unseen(candidate_ids)
         return [v for v in candidates if v.id in unseen_ids]
+
+    async def fetch_unseen_shorts_for_channel(
+        self,
+        channel_id: str,
+        target_count: int,
+        max_scan_items: int = 500
+    ) -> List[VideoMetadata]:
+        """
+        Paginates through a channel's uploads playlist in a loop until at least
+        target_count unseen Shorts are found (or all uploads are exhausted).
+        
+        Args:
+            channel_id: Channel ID to scan
+            target_count: Number of unseen Shorts required from this channel
+            max_scan_items: Safety limit for maximum upload items to scan
+            
+        Returns:
+            List of unseen VideoMetadata objects for Shorts from this channel
+        """
+        unseen_shorts: List[VideoMetadata] = []
+        scanned_count = 0
+        page_token: Optional[str] = None
+        
+        try:
+            uploads_playlist_id = await self.client.get_channel_uploads_playlist_id(channel_id)
+        except Exception as e:
+            logger.error(f"Failed to get uploads playlist for channel {channel_id}: {e}")
+            return []
+        
+        logger.info(f"Scanning channel {channel_id} for {target_count} unseen Shorts...")
+        
+        while len(unseen_shorts) < target_count and scanned_count < max_scan_items:
+            try:
+                items, next_page_token = await self.client.get_playlist_items(
+                    uploads_playlist_id,
+                    page_token=page_token,
+                    max_results=50
+                )
+            except Exception as e:
+                logger.error(f"Error fetching uploads page for channel {channel_id}: {e}")
+                break
+            
+            if not items:
+                break
+            
+            scanned_count += len(items)
+            video_ids = [item.video_id for item in items if item.video_id]
+            
+            # Filter out seen IDs using history first to avoid unnecessary metadata API calls
+            unseen_ids = await self.history.filter_unseen(video_ids)
+            
+            if unseen_ids:
+                # Filter unseen IDs to only valid Shorts (duration, public, non-live)
+                shorts, _ = await self.filter.filter_shorts(unseen_ids)
+                unseen_shorts.extend(shorts)
+                logger.debug(
+                    f"Channel {channel_id}: scanned {scanned_count} uploads -> "
+                    f"found {len(unseen_shorts)}/{target_count} unseen Shorts"
+                )
+            
+            if not next_page_token or len(unseen_shorts) >= target_count:
+                break
+            
+            page_token = next_page_token
+        
+        logger.info(
+            f"Finished scanning channel {channel_id}: found {len(unseen_shorts)} "
+            f"unseen Shorts across {scanned_count} scanned uploads (target: {target_count})"
+        )
+        return unseen_shorts
+
+    async def select_balanced_shorts(self) -> List[VideoMetadata]:
+        """
+        Fetch unseen Shorts in a loop for each channel until batch_size // num_channels
+        videos are found per channel, then select and interleave them.
+        
+        Returns:
+            List of selected VideoMetadata objects
+            
+        Raises:
+            InsufficientShortsError: If total unseen Shorts across channels is below batch_size
+        """
+        channels = self.config.channel_ids
+        if not channels:
+            raise PlaylistError("No channel IDs configured")
+        
+        num_channels = len(channels)
+        base_count = self.config.batch_size // num_channels
+        remainder = self.config.batch_size % num_channels
+        
+        # Calculate target per channel (distributing remainder so sum == batch_size)
+        channel_targets: Dict[str, int] = {}
+        for i, channel_id in enumerate(channels):
+            channel_targets[channel_id] = base_count + (1 if i < remainder else 0)
+        
+        logger.info(
+            f"Selecting balanced playlist of {self.config.batch_size} Shorts across "
+            f"{num_channels} channels. Per-channel targets: {channel_targets}"
+        )
+        
+        # Fetch unseen Shorts concurrently for all channels in a loop
+        tasks = [
+            self.fetch_unseen_shorts_for_channel(cid, target)
+            for cid, target in channel_targets.items()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        pool_per_channel: Dict[str, List[VideoMetadata]] = {}
+        selected_per_channel: Dict[str, List[VideoMetadata]] = {}
+        
+        for cid, res in zip(channels, results):
+            if isinstance(res, Exception):
+                logger.error(f"Failed to fetch unseen shorts for channel {cid}: {res}")
+                pool_per_channel[cid] = []
+            else:
+                pool_per_channel[cid] = res
+        
+        # Select target count from each channel
+        for cid in channels:
+            target = channel_targets[cid]
+            available = pool_per_channel.get(cid, [])
+            if len(available) >= target:
+                chosen = random.sample(available, target)
+            else:
+                chosen = list(available)
+                logger.warning(
+                    f"Channel {cid} only had {len(chosen)} unseen Shorts (target was {target})"
+                )
+            selected_per_channel[cid] = chosen
+        
+        total_selected: List[VideoMetadata] = []
+        for cid in channels:
+            total_selected.extend(selected_per_channel[cid])
+        
+        # If any channel fell short of its quota, top up from channels with excess unseen shorts
+        deficit = self.config.batch_size - len(total_selected)
+        if deficit > 0:
+            logger.info(f"Attempting to fill deficit of {deficit} videos from channels with extra candidates...")
+            for cid in channels:
+                chosen_ids = {v.id for v in selected_per_channel[cid]}
+                extras = [v for v in pool_per_channel.get(cid, []) if v.id not in chosen_ids]
+                if extras:
+                    take = min(len(extras), deficit)
+                    picked = random.sample(extras, take)
+                    selected_per_channel[cid].extend(picked)
+                    total_selected.extend(picked)
+                    deficit -= take
+                    if deficit == 0:
+                        break
+        
+        # Check if we met the required batch_size
+        if len(total_selected) < self.config.batch_size:
+            raise InsufficientShortsError(
+                f"Only {len(total_selected)} unseen Shorts available across all channels, need {self.config.batch_size}",
+                available=len(total_selected),
+                requested=self.config.batch_size
+            )
+        
+        # Interleave channels round-robin for an alternating DJ mix
+        interleaved: List[VideoMetadata] = []
+        channel_queues = [list(selected_per_channel[cid]) for cid in channels]
+        while any(channel_queues):
+            for q in channel_queues:
+                if q:
+                    interleaved.append(q.pop(0))
+        
+        return interleaved
     
     async def select_unseen_shorts(
         self,
         count: int
     ) -> List[VideoMetadata]:
         """
-        Select N unseen Shorts randomly.
+        Select unseen Shorts using balanced per-channel selection.
         
         Args:
             count: Number of Shorts to select
             
         Returns:
             List of selected unseen Shorts
-            
-        Raises:
-            InsufficientShortsError: If not enough unseen Shorts available
         """
-        # Fetch candidate Shorts
-        candidates = await self.fetch_shorts_from_channels()
-        
-        # Filter unseen
-        unseen = await self._filter_unseen_candidates(candidates)
-        
-        if len(unseen) < count:
-            raise InsufficientShortsError(
-                f"Only {len(unseen)} unseen Shorts available, need {count}",
-                available=len(unseen),
-                requested=count
-            )
-        
-        # Random selection
-        selected = random.sample(unseen, count)
-        
-        # Mark as seen (before playlist update to prevent duplicates)
+        selected = await self.select_balanced_shorts()
         await self.history.mark_seen([v.id for v in selected])
-        
         logger.info(f"Selected {len(selected)} unseen Shorts")
         return selected
     
@@ -214,12 +361,12 @@ class PlaylistManager:
         Execute the complete daily synchronization workflow.
         
         Steps:
-        1. Fetch Shorts from all configured channels
-        2. Filter out already-seen Shorts
-        3. Randomly select N Shorts (batch_size)
-        4. Mark selected Shorts as seen in history
-        5. Clear existing items from target playlist
-        6. Add selected Shorts to target playlist
+        1. Loop and paginate per channel to fetch unseen Shorts until each channel
+           reaches batch_size // num_channels videos
+        2. Balance and interleave the selected Shorts
+        3. Mark selected Shorts as seen in history
+        4. Clear existing items from target playlist
+        5. Add selected Shorts to target playlist
         
         Returns:
             SyncResult with detailed statistics
@@ -229,21 +376,13 @@ class PlaylistManager:
             PlaylistError: If playlist operations fail
         """
         start_time = datetime.utcnow()
-        
         result = SyncResult()
         
         try:
-            # Step 1: Fetch Shorts from channels
-            all_shorts = await self.fetch_shorts_from_channels()
-            result.shorts_fetched = len(all_shorts)
-            
-            # Step 2: Filter unseen
-            unseen = await self._filter_unseen_candidates(all_shorts)
-            result.shorts_filtered = len(unseen)
-            
-            # Step 3: Select random subset
-            count = min(len(unseen), self.config.batch_size)
-            selected = random.sample(unseen, count)
+            # Steps 1, 2, 3: Looped fetching, filtering, deduplication & balanced selection
+            selected = await self.select_balanced_shorts()
+            result.shorts_fetched = len(selected)
+            result.shorts_filtered = len(selected)
             result.shorts_selected = len(selected)
             result.selected_video_ids = [v.id for v in selected]
             
